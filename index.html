@@ -1,50 +1,63 @@
 <!DOCTYPE html>
-<meta charset="utf-8" />
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Stacked Bar Chart — Coffee by Time of Day</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    svg { max-width: 100%; height: auto; }
+    .chart-title { font-weight: 700; margin-bottom: 8px; }
+    
+  </style>
+</head>
 <body>
-  <svg id="chart" width="720" height="420"></svg>
+
+  <div class="chart-title">Coffee Orders by Time of Day (Stacked by Coffee Type)</div>
+  <svg id="chart" width="800" height="480" viewBox="0 0 800 480"></svg>
+
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <script>
   const svg = d3.select("#chart");
-  const width = +svg.attr("width");
-  const height = +svg.attr("height");
-  const margin = {top: 24, right: 16, bottom: 48, left: 56};
+  const width = 800, height = 480;
+  const margin = { top: 32, right: 180, bottom: 56, left: 64 };
 
-  // Desired x order
-  const timeBuckets = ["Morning","Afternoon","Night"];
+  // Change path if needed:
+  d3.csv("Coffe_sales.csv", d3.autoType).then(raw => {
+    // Normalize/trim fields in case of minor CSV inconsistencies
+    const data = raw.map(d => ({
+      Time_of_Day: String(d.Time_of_Day).trim(),
+      coffee: (d.coffeetype ?? d.coffee_name ?? "").toString().trim()
+    })).filter(d => d.Time_of_Day && d.coffee);
 
-  d3.csv("Coffe_sales.csv").then(raw => {
-    // 1) Unique stack keys = coffee types
-    const coffeeTypes = Array.from(new Set(raw.map(d => d.coffee_name))).sort();
+    // Stack keys = distinct coffee types (in first-seen order)
+    const types = d3.union(data.map(d => d.coffee));
 
-    // 2) Aggregate counts: Map(Time_of_Day -> Map(coffee_name -> count))
-    const agg = d3.rollup(
-      raw,
+    // Count rows per (Time_of_Day, coffee) → Map<Time_of_Day, Map<coffee, count>>
+    const counts = d3.rollup(
+      data,
       v => v.length,
       d => d.Time_of_Day,
-      d => d.coffee_name
+      d => d.coffee
     );
 
-    // 3) Build data in the shape expected by d3.stack():
-    //    an index (Map) from x-key -> Map(stackKey -> value)
-    //    We’ll ensure all (Time_of_Day, coffee_type) exist (fill 0s)
-    const index = new Map(
-      timeBuckets.map(tod => {
-        const byCoffee = new Map(coffeeTypes.map(k => [k, 0]));
-        const row = agg.get(tod);
-        if (row) for (const [k, v] of row) byCoffee.set(k, v);
-        return [tod, byCoffee];
-      })
-    );
+    // Build "wide" rows directly from the counts Map (NO hardcoded time buckets)
+    // rows: [{ Time_of_Day, Latte: n, Espresso: n, ... }, ...]
+    const rows = Array.from(counts, ([Time_of_Day, byType]) => {
+      const o = { Time_of_Day };
+      types.forEach(t => o[t] = byType.get(t) ?? 0); // zero-fill missing combos
+      return o;
+    });
 
-    // 4) Create stack series
-    const series = d3.stack()
-      .keys(coffeeTypes)
-      .value(([, byCoffee], key) => byCoffee.get(key) ?? 0)
-      (index); // Map(Time_of_Day -> Map(coffee->count))
+    // If nothing to plot, bail early
+   
 
-    // 5) Scales
+    // Create stack series
+    const series = d3.stack().keys(types)(rows);
+
+    // Scales
     const x = d3.scaleBand()
-      .domain(timeBuckets)
+      .domain(rows.map(d => d.Time_of_Day))
       .range([margin.left, width - margin.right])
       .padding(0.1);
 
@@ -53,29 +66,27 @@
       .range([height - margin.bottom, margin.top]);
 
     const color = d3.scaleOrdinal()
-      .domain(coffeeTypes)
+      .domain(types)
       .range(d3.schemeTableau10);
 
-    const formatValue = x => isNaN(x) ? "N/A" : x.toLocaleString("en");
-
-    // 6) Draw stacks
-    const g = svg.append("g");
-    g.selectAll("g.layer")
+    // Draw stacks
+    const gLayers = svg.append("g");
+    gLayers.selectAll("g.layer")
       .data(series)
       .join("g")
         .attr("class", "layer")
         .attr("fill", d => color(d.key))
       .selectAll("rect")
-      .data(D => D.map(d => (d.key = D.key, d))) // keep key on each rect
+      .data(S => S.map(d => (d.key = S.key, d))) // attach key (coffee type) to each rect
       .join("rect")
-        .attr("x", d => x(d.data[0]))                 // d.data[0] is Time_of_Day
+        .attr("x", d => x(d.data.Time_of_Day))
         .attr("y", d => y(d[1]))
         .attr("height", d => y(d[0]) - y(d[1]))
         .attr("width", x.bandwidth())
       .append("title")
-        .text(d => `${d.data[0]} — ${d.key}\n${formatValue(d.data[1].get(d.key))}`);
+        .text(d => `${d.data.Time_of_Day} — ${d.key}: ${d.data[d.key]}`);
 
-    // 7) Axes
+    // Axes
     svg.append("g")
       .attr("transform", `translate(0,${height - margin.bottom})`)
       .call(d3.axisBottom(x))
@@ -87,31 +98,39 @@
       .call(g => g.selectAll(".domain").remove())
       .call(g => g.append("text")
         .attr("x", 0)
-        .attr("y", margin.top - 10)
+        .attr("y", margin.top - 12)
         .attr("fill", "currentColor")
-        .attr("text-anchor", "start")
         .attr("font-weight", "600")
+        .attr("text-anchor", "start")
         .text("Total orders"));
 
-    // 8) Simple legend
+    // Legend
     const legend = svg.append("g")
-      .attr("transform", `translate(${width - margin.right - 160},${margin.top})`)
-      .attr("font-family", "sans-serif")
-      .attr("font-size", 12)
-      .selectAll("g")
-      .data(coffeeTypes)
-      .join("g")
-        .attr("transform", (d, i) => `translate(0,${i * 18})`);
+      .attr("class", "legend")
+      .attr("transform", `translate(${width - margin.right + 20}, ${margin.top})`)
+      .attr("font-size", 12);
 
-    legend.append("rect")
+    const legendItem = legend.selectAll("g.item")
+      .data(types)
+      .join("g")
+        .attr("class", "item")
+        .attr("transform", (d, i) => `translate(0, ${i * 20})`);
+
+    legendItem.append("rect")
       .attr("width", 14)
       .attr("height", 14)
       .attr("fill", d => color(d));
 
-    legend.append("text")
+    legendItem.append("text")
       .attr("x", 20)
-      .attr("y", 11)
+      .attr("y", 7)
       .text(d => d);
+
+    // helpful debug in console
+    console.log("types:", types);
+    console.log("counts (Map of Maps):", counts);
+    console.log("rows (wide format):", rows);
+    console.log("series (stack output):", series);
   });
   </script>
 </body>
